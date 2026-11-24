@@ -63,33 +63,101 @@ object Exporters {
     }
 
     fun writePdf(doc: GeoDocument, out: OutputStream) {
+        val items = registerItems(doc)
+        val staged = items.any { it.stage == "existing" || it.stage == "proposed" }
         val pdf = PdfDocument()
         try {
-            val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                textSize = 10.5f
+            val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 17f
                 color = android.graphics.Color.BLACK
-            }
-            val titlePaint = Paint(bodyPaint).apply {
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                textSize = 18f
             }
-            val lines = pdfLines(doc)
-            var pageNumber = 1
-            var index = 0
-            do {
-                val page = pdf.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNumber).create())
-                page.canvas.drawText("GeoConvert Studio Report", 40f, 48f, titlePaint)
-                var y = 78f
-                while (index < lines.size && y < 805f) {
-                    val line = lines[index].replace("📁", "[Folder]").replace("…", "...")
-                    page.canvas.drawText(line.take(105), 40f, y, bodyPaint)
-                    y += 15f
-                    index++
+            val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 9f
+                color = android.graphics.Color.BLACK
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 8.5f; color = android.graphics.Color.BLACK }
+            val lines = mutableListOf<List<String>>()
+            if (staged) {
+                lines += listOf("Sl.No", "Habitation", "Existing: Work / Category / Unique ID", "Proposed: Work / Category / Unique ID")
+                var serial = 1
+                items.filter { it.stage != null }.groupBy { it.habitation }.forEach { (habitation, group) ->
+                    val existing = group.filter { it.stage == "existing" }
+                    val proposed = group.filter { it.stage == "proposed" }
+                    repeat(maxOf(existing.size, proposed.size)) { index ->
+                        val left = existing.getOrNull(index)
+                        val right = proposed.getOrNull(index)
+                        lines += listOf(
+                            serial++.toString(), habitation,
+                            left?.let { "${it.workDescription} / ${it.category} / ${it.uniqueId}" }.orEmpty(),
+                            right?.let { "${it.workDescription} / ${it.category} / ${it.uniqueId}" }.orEmpty()
+                        )
+                    }
                 }
-                page.canvas.drawText("Page $pageNumber", 500f, 825f, bodyPaint)
-                pdf.finishPage(page)
-                pageNumber++
-            } while (index < lines.size)
+                items.filter { it.stage == null }.takeIf { it.isNotEmpty() }?.let { unknown ->
+                    lines += listOf("", "UNCLASSIFIED WORKS", "", "")
+                    unknown.forEach { lines += listOf("", it.habitation, it.workDescription, "${it.category} / ${it.uniqueId}") }
+                }
+            } else {
+                lines += listOf("Sl.No", "Habitation", "Folder / Subfolder", "Work & Description", "Category", "Unique ID")
+                items.forEachIndexed { index, item ->
+                    lines += listOf(
+                        (index + 1).toString(), item.habitation, item.folderPath,
+                        item.workDescription, item.category, item.uniqueId
+                    )
+                }
+            }
+
+            val pageWidth = 842f
+            val pageHeight = 595f
+            val pageNoRef = intArrayOf(1)
+            var page: PdfDocument.Page? = null
+            var y = 0f
+            fun startPage() {
+                page?.let { pdf.finishPage(it) }
+                page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth.toInt(), pageHeight.toInt(), pageNoRef[0]++).create())
+                val canvas = page!!.canvas
+                canvas.drawText("PANCHAYAT INFRASTRUCTURE WORKS REGISTER", 28f, 32f, titlePaint)
+                canvas.drawText("Block: ${blockLabel(items)}", 28f, 53f, bodyPaint)
+                canvas.drawText("Panchayat: ${panchayatLabel(doc, items)}", 470f, 53f, bodyPaint)
+                canvas.drawLine(28f, 62f, 814f, 62f, bodyPaint)
+                y = 82f
+            }
+            startPage()
+            lines.forEachIndexed { rowIndex, row ->
+                if (y > 558f) startPage()
+                val canvas = page!!.canvas
+                val xs = if (staged) listOf(28f, 65f, 190f, 510f) else listOf(28f, 65f, 185f, 390f, 610f, 720f)
+                row.forEachIndexed { column, value ->
+                    val maxChars = if (staged && column >= 2) 48 else if (!staged && column == 3) 31 else 20
+                    canvas.drawText(value.take(maxChars), xs.getOrElse(column) { 28f }, y, if (rowIndex == 0) headerPaint else bodyPaint)
+                }
+                canvas.drawLine(28f, y + 5f, 814f, y + 5f, bodyPaint)
+                y += if (rowIndex == 0) 20f else 17f
+            }
+            page?.let { pdf.finishPage(it) }
+
+            val coordinates = items.flatMap { item ->
+                item.feature.coordinates.mapIndexed { index, point ->
+                    "${item.habitation} | ${item.workDescription} | #${index + 1} | Lat ${point.latitude} | Lon ${point.longitude}" +
+                        (point.altitude?.let { " | Alt $it" } ?: "")
+                }
+            }
+            if (coordinates.isNotEmpty()) {
+                var index = 0
+                while (index < coordinates.size) {
+                    val coordinatePage = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth.toInt(), pageHeight.toInt(), pageNoRef[0]++).create())
+                    coordinatePage.canvas.drawText("COORDINATE DETAILS", 28f, 32f, titlePaint)
+                    var coordY = 60f
+                    while (index < coordinates.size && coordY < 565f) {
+                        coordinatePage.canvas.drawText(coordinates[index].take(130), 28f, coordY, bodyPaint)
+                        coordY += 15f
+                        index++
+                    }
+                    pdf.finishPage(coordinatePage)
+                }
+            }
             pdf.writeTo(out)
         } finally {
             pdf.close()
@@ -97,55 +165,62 @@ object Exporters {
     }
 
     fun writeDocx(doc: GeoDocument, out: OutputStream) {
+        val items = registerItems(doc)
+        val staged = items.any { it.stage == "existing" || it.stage == "proposed" }
         val body = StringBuilder()
         fun paragraph(text: String, style: String = "Normal") {
-            body.append(
-                "<w:p><w:pPr><w:pStyle w:val=\"$style\"/></w:pPr>" +
-                    "<w:r><w:t xml:space=\"preserve\">${xml(text)}</w:t></w:r></w:p>"
-            )
-        }
-        fun appendFeature(feature: GeoFeature, depth: Int) {
-            val prefix = "  ".repeat(depth)
-            paragraph("$prefix• ${feature.name?.ifBlank { feature.id } ?: feature.id} [${feature.geometryType}]")
-            paragraph("$prefix  Coordinate count: ${feature.coordinates.size}")
-            feature.description?.takeIf { it.isNotBlank() }?.let { paragraph("$prefix  Description: $it") }
-            feature.properties.forEach { (key, value) -> paragraph("$prefix  $key: $value") }
-            feature.coordinates.forEachIndexed { index, coordinate ->
-                paragraph(
-                    "$prefix  ${index + 1}. Longitude: ${coordinate.longitude} | Latitude: ${coordinate.latitude}" +
-                        (coordinate.altitude?.let { " | Altitude: $it" } ?: "")
-                )
-            }
-        }
-        fun appendFolder(folder: GeoFolder, depth: Int) {
-            paragraph("${folder.name} (${countFeatures(folder)} features)", if (depth == 0) "Heading1" else "Heading2")
-            folder.features.forEach { appendFeature(it, depth + 1) }
-            folder.folders.forEach { appendFolder(it, depth + 1) }
+            body.append("<w:p><w:pPr><w:pStyle w:val=\"$style\"/></w:pPr><w:r><w:t xml:space=\"preserve\">${xml(text)}</w:t></w:r></w:p>")
         }
 
-        paragraph("GeoConvert Studio Report", "Title")
-        paragraph("Source: ${doc.fileName}")
-        paragraph("Format: ${doc.sourceFormat}")
-        paragraph("Total features: ${doc.features.size}")
-        paragraph("Folder hierarchy", "Heading1")
-        doc.folders.forEach { appendFolder(it, 0) }
-        if (doc.unfiledFeatures.isNotEmpty()) {
-            paragraph("Unfiled items (${doc.unfiledFeatures.size} features)", "Heading1")
-            doc.unfiledFeatures.forEach { appendFeature(it, 1) }
+        paragraph("PANCHAYAT INFRASTRUCTURE WORKS REGISTER", "Title")
+        paragraph("Block: ${blockLabel(items)}     Panchayat: ${panchayatLabel(doc, items)}")
+        paragraph("Folder / habitation based register", "Heading1")
+        if (staged) {
+            paragraph("EXISTING AND PROPOSED WORKS", "Heading1")
+            var serial = 1
+            items.filter { it.stage != null }.groupBy { it.habitation }.forEach { (habitation, group) ->
+                paragraph("${serial++}. $habitation", "Heading2")
+                paragraph("EXISTING — Work & Description | Category | Unique ID", "Heading3")
+                group.filter { it.stage == "existing" }.forEach { item ->
+                    paragraph("${item.workDescription} | ${item.category} | ${item.uniqueId}")
+                }
+                paragraph("PROPOSED — Work & Description | Category | Unique ID", "Heading3")
+                group.filter { it.stage == "proposed" }.forEach { item ->
+                    paragraph("${item.workDescription} | ${item.category} | ${item.uniqueId}")
+                }
+            }
+            items.filter { it.stage == null }.forEach { item ->
+                paragraph("Unclassified | ${item.habitation} | ${item.workDescription} | ${item.category} | ${item.uniqueId}")
+            }
+        } else {
+            paragraph("Sl.No | Habitation | Folder / Subfolder | Work & Description | Category | Unique ID", "Heading2")
+            items.groupBy { it.habitation }.forEach { (habitation, group) ->
+                paragraph(habitation, "Heading2")
+                group.forEach { item ->
+                    paragraph("${item.folderPath} | ${item.workDescription} | ${item.category} | ${item.uniqueId} | ${item.feature.geometryType}")
+                }
+            }
         }
-        if (doc.features.isEmpty()) paragraph("No geographical features were found.")
+
+        paragraph("COORDINATE DETAILS", "Heading1")
+        items.forEach { item ->
+            paragraph("${item.habitation} / ${item.workDescription}", "Heading2")
+            item.feature.coordinates.forEachIndexed { index, coordinate ->
+                paragraph("${index + 1}. Latitude: ${coordinate.latitude} | Longitude: ${coordinate.longitude}" +
+                    (coordinate.altitude?.let { " | Altitude: $it" } ?: ""))
+            }
+        }
 
         val documentXml =
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
                 "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">" +
-                "<w:body>$body<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr></w:body></w:document>"
+                "<w:body>$body<w:sectPr><w:pgSz w:w=\"16838\" w:h=\"11906\" w:orient=\"landscape\"/></w:sectPr></w:body></w:document>"
         ZipOutputStream(out).use { zip ->
             addEntry(zip, "[Content_Types].xml", """<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>""")
             addEntry(zip, "_rels/.rels", """<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>""")
             addEntry(zip, "word/document.xml", documentXml)
         }
     }
-
 
     private data class RegisterItem(
         val feature: GeoFeature,
