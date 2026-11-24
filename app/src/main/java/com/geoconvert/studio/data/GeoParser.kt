@@ -92,6 +92,8 @@ object GeoParser {
         var description: String? = null
         var geometry = "UNKNOWN"
         var coordinates = mutableListOf<Coordinate>()
+        var properties = mutableMapOf<String, String>()
+        var dataKey: String? = null
         var id = 0
 
         while (event != XmlPullParser.END_DOCUMENT) {
@@ -104,6 +106,17 @@ object GeoParser {
                         description = null
                         geometry = "UNKNOWN"
                         coordinates = mutableListOf()
+                        properties = mutableMapOf()
+                        dataKey = null
+                    }
+                    "data" -> if (inPlacemark) dataKey = xml.getAttributeValue(null, "name")
+                    "simpledata" -> if (inPlacemark) {
+                        val propertyName = xml.getAttributeValue(null, "name")
+                        val propertyValue = xml.nextText().trim()
+                        if (!propertyName.isNullOrBlank()) properties[propertyName] = propertyValue
+                    }
+                    "value" -> if (inPlacemark && !dataKey.isNullOrBlank()) {
+                        properties[dataKey!!] = xml.nextText().trim()
                     }
                     "name" -> {
                         if (inPlacemark && placemarkName == null) {
@@ -131,7 +144,8 @@ object GeoParser {
                             geometryType = geometry,
                             coordinates = coordinates.toList(),
                             description = description,
-                            folderPath = path
+                            folderPath = path,
+                            properties = properties.toMap()
                         )
                         allFeatures += feature
                         if (folderStack.isEmpty()) unfiled += feature else folderStack.last().features += feature
