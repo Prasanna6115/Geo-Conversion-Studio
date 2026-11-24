@@ -284,7 +284,7 @@ object GeoParser {
 
             walk(geometry.opt("coordinates"))
             val rawPath = properties["folderPath"] ?: properties["folder"]
-            val folderPath = rawPath?.split('/', '\\\\')
+            val folderPath = rawPath?.split('/')
                 ?.map { it.trim() }?.filter { it.isNotEmpty() }
                 ?.takeIf { it.isNotEmpty() } ?: listOf("Features")
             features += GeoFeature(
